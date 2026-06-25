@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  IAM groups for Bedrock model access tiers.
+  FullAccess group: unrestricted model access (AI Data Team, Professional Services, Presales).
+  StandardAccess group: Haiku + Sonnet only — Opus and Fable are denied.
+  To allow a new expensive model for standard users, add its ARN patterns to the
+  BedrockOpusDenyPolicy resource list below. No changes needed to allow new cheap models.
+
+Resources:
+
+  # ── Deny policy attached to the StandardAccess group ──────────────────────
+  # Blocks Opus and Fable tier models by ARN pattern. Update this list to add
+  # new expensive models to the block list as they are released.
+  BedrockOpusDenyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: BedrockStandardAccess-OpusDeny
+      Description: Denies invocation of Opus and Fable tier models for standard-access users
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyExpensiveModels
+            Effect: Deny
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource:
+              # ── Foundation model ARNs (direct invocation) ─────────────────
+              - arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-*
+              - arn:aws:bedrock:*::foundation-model/anthropic.claude-fable-*
+              # ── Cross-region inference profile ARNs (us. prefix) ──────────
+              - arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-opus-*
+              - arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-fable-*
+              # ── Global cross-region inference profile ARNs ─────────────────
+              - arn:aws:bedrock:*:*:inference-profile/global.anthropic.claude-opus-*
+              - arn:aws:bedrock:*:*:inference-profile/global.anthropic.claude-fable-*
+
+  # ── Full Access group (AI Data Team, Professional Services, Presales) ──────
+  BedrockFullAccessGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: Bedrock-FullAccess
+      # No deny policy attached — base AmazonBedrockLimitedAccess on each user is sufficient
+
+  # ── Standard Access group (Ops, Sales, SecureAid, MSP) ────────────────────
+  BedrockStandardAccessGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: Bedrock-StandardAccess
+      ManagedPolicyArns:
+        - !Ref BedrockOpusDenyPolicy
+
+  # ── Full Access memberships ────────────────────────────────────────────────
+  MembershipFullAccess:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties:
+      GroupName: !Ref BedrockFullAccessGroup
+      Users:
+        - BedrockAPIKey-0ekh   # Joe Conlin       — Presales
+        - BedrockAPIKey-2klj   # Abhijeet Nazar    — AI Data Team
+        - BedrockAPIKey-3r3k   # Larry Gibbs       — Professional Services
+        - BedrockAPIKey-4jjr   # Asad Siddiqi      — Professional Services
+        - BedrockAPIKey-66xi   # Drew Ingersol     — Professional Services
+        - BedrockAPIKey-9a7s   # Jack Choi         — Professional Services
+        - BedrockAPIKey-auby   # Vikram Singh      — Professional Services
+        - BedrockAPIKey-cx3b   # Avineet Agarwalla — AI Data Team
+        - BedrockAPIKey-f5pe   # Steve Myers       — Professional Services
+        - BedrockAPIKey-fviy   # Kriparam Mannaraj — AI Data Team
+        - BedrockAPIKey-h233   # Coin Graham       — Professional Services
+        - BedrockAPIKey-ivg1   # Pratik Shah       — AI Data Team
+        - BedrockAPIKey-sqqk   # Proposal User     — Professional Services
+        - BedrockAPIKey-xe4k   # Matthew Jagiello  — Pre Sales
+
+  # ── Standard Access memberships ───────────────────────────────────────────
+  MembershipStandardAccess:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties:
+      GroupName: !Ref BedrockStandardAccessGroup
+      Users:
+        - BedrockAPIKey-7i34   # Inkyo Kim      — Ops Team
+        - BedrockAPIKey-8i0d   # JJ Cabin       — Sales
+        - BedrockAPIKey-mr6t   # Matt Franz     — SecureAid
+        - BedrockAPIKey-thdp   # Padma Tadepalli — MSP
+
+Outputs:
+  FullAccessGroupName:
+    Value: !Ref BedrockFullAccessGroup
+    Description: IAM group for unrestricted Bedrock model access
+
+  StandardAccessGroupName:
+    Value: !Ref BedrockStandardAccessGroup
+    Description: IAM group for Haiku/Sonnet-only Bedrock access
+
+  OpusDenyPolicyArn:
+    Value: !Ref BedrockOpusDenyPolicy
+    Description: Managed policy ARN that blocks Opus/Fable — attach to any future restricted group

@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cost Anomaly Detection for Bedrock. Deploy this AFTER bedrock-observability stack is live,
+  since CE::AnomalySubscription requires the SNS topic to already exist.
+
+Resources:
+  BedrockAnomalyMonitor:
+    Type: AWS::CE::AnomalyMonitor
+    Properties:
+      MonitorName: BedrockServiceMonitor
+      MonitorType: DIMENSIONAL
+      MonitorDimension: SERVICE
+
+  BedrockAnomalySubscription:
+    Type: AWS::CE::AnomalySubscription
+    Properties:
+      SubscriptionName: BedrockAnomalyAlerts
+      MonitorArnList:
+        - !GetAtt BedrockAnomalyMonitor.MonitorArn
+      Subscribers:
+        - Address: !ImportValue BedrockAlertTopicArn
+          Type: SNS
+      ThresholdExpression:
+        Dimensions:
+          Key: ANOMALY_TOTAL_IMPACT_ABSOLUTE
+          MatchOptions:
+            - GREATER_THAN_OR_EQUAL
+          Values:
+            - "50"
+      Frequency: DAILY
+
+Outputs:
+  AnomalyMonitorArn:
+    Value: !GetAtt BedrockAnomalyMonitor.MonitorArn

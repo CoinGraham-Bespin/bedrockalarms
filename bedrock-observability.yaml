@@ -1,0 +1,824 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bedrock cost observability: SNS alerts, per-user CloudWatch metric filters and alarms,
+  account-level token-rate alarms, AWS Budgets, and Cost Anomaly Detection.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Default: coin.graham@bespinglobal.com
+    Description: Email address to receive all Bedrock cost alerts
+
+  # ── Per-user 5-minute token spike thresholds ──────────────────────────────
+  # Tune these based on legitimate max usage per session.
+  # At Haiku 4.5 pricing ($0.00025/1K input tokens), 10M tokens = ~$2.50 per 5 min.
+  UserTokenAlarmThreshold:
+    Type: Number
+    Default: 10000000
+    Description: Per-user input tokens in 5 minutes that triggers an alarm (default 10M)
+
+  # ── Account-level thresholds (all users combined per model) ───────────────
+  Haiku5MinTokenThreshold:
+    Type: Number
+    Default: 50000000
+    Description: Account-wide Haiku 4.5 input tokens in 5 min to trigger alarm (default 50M ~= $12.50)
+
+  Sonnet5MinTokenThreshold:
+    Type: Number
+    Default: 10000000
+    Description: Account-wide Sonnet 4.6 input tokens in 5 min to trigger alarm (default 10M ~= $30)
+
+  OpusAny5MinTokenThreshold:
+    Type: Number
+    Default: 2000000
+    Description: Account-wide Opus input tokens in 5 min to trigger alarm (default 2M ~= $30)
+
+  # ── Budget thresholds ─────────────────────────────────────────────────────
+  MonthlyBudgetLimit:
+    Type: Number
+    Default: 500
+    Description: Monthly Bedrock budget in USD before alerting at 80% and 100%
+
+  DailyBudgetLimit:
+    Type: Number
+    Default: 75
+    Description: Daily Bedrock budget in USD — alerts at 50% and 100%
+
+Resources:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # SNS
+  # ════════════════════════════════════════════════════════════════════════════
+  BedrockAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: bedrock-cost-alerts
+      DisplayName: Bedrock Cost Alerts
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref BedrockAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # Budgets needs its own SNS policy to publish
+  BedrockAlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref BedrockAlertTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowBudgetsPublish
+            Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref BedrockAlertTopic
+          - Sid: AllowAnomalyDetectionPublish
+            Effect: Allow
+            Principal:
+              Service: costalerts.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref BedrockAlertTopic
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # PER-USER METRIC FILTERS on bedrock-logs
+  # Each filter extracts inputTokenCount for one IAM user → custom CW metric
+  # Metric namespace: Bedrock/UserTokens, dimension: UserName
+  # ════════════════════════════════════════════════════════════════════════════
+
+  # ── BedrockAPIKey-0ekh / Joe Conlin ───────────────────────────────────────
+  MetricFilter0ekh:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-0ekh
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-0ekh" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-0ekh
+          MetricValue: $.input.inputTokenCount
+
+  Alarm0ekh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-0ekh-JoeConlin
+      AlarmDescription: "Joe Conlin (BedrockAPIKey-0ekh) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-0ekh
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-2klj / Abhijeet Nazar ───────────────────────────────────
+  MetricFilter2klj:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-2klj
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-2klj" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-2klj
+          MetricValue: $.input.inputTokenCount
+
+  Alarm2klj:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-2klj-AbhijeetNazar
+      AlarmDescription: "Abhijeet Nazar (BedrockAPIKey-2klj) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-2klj
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-3r3k / Larry Gibbs ──────────────────────────────────────
+  MetricFilter3r3k:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-3r3k
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-3r3k" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-3r3k
+          MetricValue: $.input.inputTokenCount
+
+  Alarm3r3k:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-3r3k-LarryGibbs
+      AlarmDescription: "Larry Gibbs (BedrockAPIKey-3r3k) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-3r3k
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-4jjr / Asad Siddiqi ─────────────────────────────────────
+  MetricFilter4jjr:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-4jjr
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-4jjr" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-4jjr
+          MetricValue: $.input.inputTokenCount
+
+  Alarm4jjr:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-4jjr-AsadSiddiqi
+      AlarmDescription: "Asad Siddiqi (BedrockAPIKey-4jjr) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-4jjr
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-66xi / Drew Ingersol ────────────────────────────────────
+  MetricFilter66xi:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-66xi
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-66xi" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-66xi
+          MetricValue: $.input.inputTokenCount
+
+  Alarm66xi:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-66xi-DrewIngersol
+      AlarmDescription: "Drew Ingersol (BedrockAPIKey-66xi) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-66xi
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-7i34 / Inkyo Kim ────────────────────────────────────────
+  MetricFilter7i34:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-7i34
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-7i34" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-7i34
+          MetricValue: $.input.inputTokenCount
+
+  Alarm7i34:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-7i34-InkyoKim
+      AlarmDescription: "Inkyo Kim (BedrockAPIKey-7i34) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-7i34
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-8i0d / JJ Cabin ─────────────────────────────────────────
+  MetricFilter8i0d:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-8i0d
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-8i0d" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-8i0d
+          MetricValue: $.input.inputTokenCount
+
+  Alarm8i0d:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-8i0d-JJCabin
+      AlarmDescription: "JJ Cabin (BedrockAPIKey-8i0d) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-8i0d
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-9a7s / Jack Choi ────────────────────────────────────────
+  MetricFilter9a7s:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-9a7s
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-9a7s" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-9a7s
+          MetricValue: $.input.inputTokenCount
+
+  Alarm9a7s:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-9a7s-JackChoi
+      AlarmDescription: "Jack Choi (BedrockAPIKey-9a7s) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-9a7s
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-auby / Vikram Singh ─────────────────────────────────────
+  MetricFilterauby:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-auby
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-auby" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-auby
+          MetricValue: $.input.inputTokenCount
+
+  Alarmauby:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-auby-VikramSingh
+      AlarmDescription: "Vikram Singh (BedrockAPIKey-auby) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-auby
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-cx3b / Avineet Agarwalla ────────────────────────────────
+  MetricFiltercx3b:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-cx3b
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-cx3b" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-cx3b
+          MetricValue: $.input.inputTokenCount
+
+  Alarmcx3b:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-cx3b-AvineetAgarwalla
+      AlarmDescription: "Avineet Agarwalla (BedrockAPIKey-cx3b) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-cx3b
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-f5pe / Steve Myers ──────────────────────────────────────
+  MetricFilterf5pe:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-f5pe
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-f5pe" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-f5pe
+          MetricValue: $.input.inputTokenCount
+
+  Alarmf5pe:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-f5pe-SteveMyers
+      AlarmDescription: "Steve Myers (BedrockAPIKey-f5pe) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-f5pe
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-fviy / Kriparam Mannaraj ────────────────────────────────
+  MetricFilterfviy:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-fviy
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-fviy" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-fviy
+          MetricValue: $.input.inputTokenCount
+
+  Alarmfviy:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-fviy-KriparamMannaraj
+      AlarmDescription: "Kriparam Mannaraj (BedrockAPIKey-fviy) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-fviy
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-h233 / Coin Graham ──────────────────────────────────────
+  MetricFilterh233:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-h233
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-h233" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-h233
+          MetricValue: $.input.inputTokenCount
+
+  Alarmh233:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-h233-CoinGraham
+      AlarmDescription: "Coin Graham (BedrockAPIKey-h233) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-h233
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-ivg1 / Pratik Shah ──────────────────────────────────────
+  MetricFilterivg1:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-ivg1
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-ivg1" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-ivg1
+          MetricValue: $.input.inputTokenCount
+
+  Alarmivg1:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-ivg1-PratikShah
+      AlarmDescription: "Pratik Shah (BedrockAPIKey-ivg1) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-ivg1
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-mr6t / Matt Franz ───────────────────────────────────────
+  MetricFiltermr6t:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-mr6t
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-mr6t" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-mr6t
+          MetricValue: $.input.inputTokenCount
+
+  Alarmmr6t:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-mr6t-MattFranz
+      AlarmDescription: "Matt Franz (BedrockAPIKey-mr6t) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-mr6t
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-sqqk / Proposal User ────────────────────────────────────
+  MetricFiltersqqk:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-sqqk
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-sqqk" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-sqqk
+          MetricValue: $.input.inputTokenCount
+
+  Alarmsqqk:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-sqqk-ProposalUser
+      AlarmDescription: "Proposal User (BedrockAPIKey-sqqk) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-sqqk
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-thdp / Padma Tadepalli ──────────────────────────────────
+  MetricFilterthdp:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-thdp
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-thdp" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-thdp
+          MetricValue: $.input.inputTokenCount
+
+  Alarmthdp:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-thdp-PadmaTadepalli
+      AlarmDescription: "Padma Tadepalli (BedrockAPIKey-thdp) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-thdp
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-xe4k / Matthew Jagiello ─────────────────────────────────
+  MetricFilterxe4k:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-xe4k
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-xe4k" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-xe4k
+          MetricValue: $.input.inputTokenCount
+
+  Alarmxe4k:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-xe4k-MatthewJagiello
+      AlarmDescription: "Matthew Jagiello (BedrockAPIKey-xe4k) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-xe4k
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # ACCOUNT-LEVEL CLOUDWATCH ALARMS (AWS/Bedrock namespace — 5-minute native)
+  # These fire on aggregate model usage regardless of which user caused it.
+  # ════════════════════════════════════════════════════════════════════════════
+  AlarmHaiku45Tokens:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Haiku45-InputTokens
+      AlarmDescription: "Account-wide Haiku 4.5 input token rate spike — potential runaway agent"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-haiku-4-5-20251001-v1:0
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref Haiku5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmSonnet46Tokens:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Sonnet46-InputTokens
+      AlarmDescription: "Account-wide Sonnet 4.6 input token rate spike — potential runaway agent"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-sonnet-4-6
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref Sonnet5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmOpus48Tokens:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Opus48-InputTokens
+      AlarmDescription: "Account-wide Opus 4.8 input token rate spike — high cost model, any spike is notable"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-opus-4-8
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref OpusAny5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmOpus46Tokens:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Opus46-InputTokens
+      AlarmDescription: "Account-wide Opus 4.6 input token rate spike"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-opus-4-6-v1
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref OpusAny5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmSonnet45Tokens:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Sonnet45-InputTokens
+      AlarmDescription: "Account-wide Sonnet 4.5 input token rate spike"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref Sonnet5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # AWS BUDGETS
+  # Note: Budgets are global (not regional) and use Cost Explorer data which
+  # has up to 8-hour lag — use CW alarms above for real-time detection.
+  # Budgets are the catch-all for total spend guardrails.
+  # ════════════════════════════════════════════════════════════════════════════
+  BedrockMonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: Bedrock-Monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetLimit
+          Unit: USD
+        CostFilters:
+          Service:
+            - Amazon Bedrock
+            - Claude Haiku 4.5 (Amazon Bedrock Edition)
+            - Claude Sonnet 4.5 (Amazon Bedrock Edition)
+            - Claude Sonnet 4.6 (Amazon Bedrock Edition)
+            - Claude Opus 4.6 (Amazon Bedrock Edition)
+            - Claude Opus 4.8 (Amazon Bedrock Edition)
+            - Claude 3.5 Haiku (Amazon Bedrock Edition)
+        CostTypes:
+          IncludeTax: true
+          IncludeSubscription: true
+          UseBlended: false
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BedrockAlertTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BedrockAlertTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BedrockAlertTopic
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BedrockAlertTopic
+
+  BedrockDailyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: Bedrock-Daily
+        BudgetType: COST
+        TimeUnit: DAILY
+        BudgetLimit:
+          Amount: !Ref DailyBudgetLimit
+          Unit: USD
+        CostFilters:
+          Service:
+            - Amazon Bedrock
+            - Claude Haiku 4.5 (Amazon Bedrock Edition)
+            - Claude Sonnet 4.5 (Amazon Bedrock Edition)
+            - Claude Sonnet 4.6 (Amazon Bedrock Edition)
+            - Claude Opus 4.6 (Amazon Bedrock Edition)
+            - Claude Opus 4.8 (Amazon Bedrock Edition)
+            - Claude 3.5 Haiku (Amazon Bedrock Edition)
+        CostTypes:
+          IncludeTax: true
+          IncludeSubscription: true
+          UseBlended: false
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 33
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BedrockAlertTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 66
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BedrockAlertTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BedrockAlertTopic
+
+  # Note: bedrock-logs retention was extended to 90 days via CLI (aws logs put-retention-policy)
+  # since the log group pre-existed and CFN EarlyValidation blocks re-declaring existing log groups.
+  # Cost Anomaly Detection is deployed separately in bedrock-anomaly.yaml after this stack is live,
+  # because CE::AnomalySubscription requires the SNS topic to exist before CFN EarlyValidation passes.
+
+Outputs:
+  SNSTopicArn:
+    Value: !Ref BedrockAlertTopic
+    Description: SNS topic ARN — subscribe additional emails or Slack webhooks here
+    Export:
+      Name: BedrockAlertTopicArn
+
+  MonthlyBudgetName:
+    Value: !Ref BedrockMonthlyBudget
+
+  DailyBudgetName:
+    Value: !Ref BedrockDailyBudget

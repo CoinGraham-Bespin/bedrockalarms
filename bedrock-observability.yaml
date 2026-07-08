@@ -750,7 +750,7 @@ Resources:
         - Notification:
             NotificationType: FORECASTED
             ComparisonOperator: GREATER_THAN
-            Threshold: 100
+            Threshold: 200
             ThresholdType: PERCENTAGE
           Subscribers:
             - SubscriptionType: SNS
@@ -783,22 +783,6 @@ Resources:
         - Notification:
             NotificationType: ACTUAL
             ComparisonOperator: GREATER_THAN
-            Threshold: 33
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref BedrockAlertTopic
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            Threshold: 66
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref BedrockAlertTopic
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
             Threshold: 100
             ThresholdType: PERCENTAGE
           Subscribers:
@@ -809,6 +793,137 @@ Resources:
   # since the log group pre-existed and CFN EarlyValidation blocks re-declaring existing log groups.
   # Cost Anomaly Detection is deployed separately in bedrock-anomaly.yaml after this stack is live,
   # because CE::AnomalySubscription requires the SNS topic to exist before CFN EarlyValidation passes.
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # DAILY MORNING DIGEST — Lambda + EventBridge
+  # Runs at 10:00 AM UTC (6 AM EDT) daily to report yesterday's Bedrock spend.
+  # AWS Budgets resets at midnight UTC and Cost Explorer has up to 8-hour lag,
+  # so delayed budget alerts can arrive unexpectedly in the morning. This digest
+  # gives you a predictable daily email with actual spend before you start work,
+  # replacing the surprise of a lagged threshold alert.
+  # ════════════════════════════════════════════════════════════════════════════
+  DigestLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: bedrock-cost-digest-lambda
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DigestPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ce:GetCostAndUsage
+                Resource: '*'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref BedrockAlertTopic
+
+  DigestLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: bedrock-daily-cost-digest
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DigestLambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref BedrockAlertTopic
+          DAILY_BUDGET: !Ref DailyBudgetLimit
+      Code:
+        ZipFile: |
+          import boto3, os
+          from datetime import date, timedelta
+
+          SERVICES = [
+              'Amazon Bedrock',
+              'Claude Haiku 4.5 (Amazon Bedrock Edition)',
+              'Claude Sonnet 4.5 (Amazon Bedrock Edition)',
+              'Claude Sonnet 4.6 (Amazon Bedrock Edition)',
+              'Claude Opus 4.6 (Amazon Bedrock Edition)',
+              'Claude Opus 4.8 (Amazon Bedrock Edition)',
+              'Claude 3.5 Haiku (Amazon Bedrock Edition)',
+          ]
+
+          def handler(event, context):
+              today = date.today()
+              yesterday = today - timedelta(days=1)
+              start, end = str(yesterday), str(today)
+              daily_budget = float(os.environ.get('DAILY_BUDGET', '75'))
+
+              ce = boto3.client('ce', region_name='us-east-1')
+              resp = ce.get_cost_and_usage(
+                  TimePeriod={'Start': start, 'End': end},
+                  Granularity='DAILY',
+                  Filter={'Dimensions': {'Key': 'SERVICE', 'Values': SERVICES}},
+                  GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}],
+                  Metrics=['UnblendedCost'],
+              )
+
+              total = 0.0
+              lines = []
+              for result in resp['ResultsByTime']:
+                  for group in result['Groups']:
+                      svc = group['Keys'][0]
+                      amt = float(group['Metrics']['UnblendedCost']['Amount'])
+                      if amt > 0:
+                          lines.append(f'  {svc}: ${amt:.4f}')
+                          total += amt
+
+              pct = (total / daily_budget * 100) if daily_budget else 0
+              status = 'OVER BUDGET' if total > daily_budget else ('WARNING' if pct >= 66 else 'OK')
+
+              if not lines:
+                  body = (
+                      f'Bedrock Daily Digest — {yesterday} UTC\n\n'
+                      f'No Bedrock spend recorded for {yesterday}.\n'
+                      f'(Data may still be processing if spend occurred late UTC.)\n\n'
+                      f'Daily budget: ${daily_budget:.2f}'
+                  )
+              else:
+                  breakdown = '\n'.join(lines)
+                  body = (
+                      f'Bedrock Daily Digest — {yesterday} UTC\n\n'
+                      f'Total: ${total:.4f}  ({pct:.1f}% of ${daily_budget:.2f} daily budget) [{status}]\n\n'
+                      f'Breakdown:\n{breakdown}\n\n'
+                      f'Note: Cost Explorer data has up to 8-hour lag. This digest runs at\n'
+                      f'10:00 AM UTC (6 AM EDT) so yesterday\'s full spend is captured here\n'
+                      f'rather than arriving as a surprise Budget threshold alert.'
+                  )
+
+              boto3.client('sns').publish(
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
+                  Subject=f'[Bedrock Daily Digest — routine, not a budget alert] {yesterday} — ${total:.4f} ({status})',
+                  Message=body,
+              )
+
+  DigestSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: bedrock-cost-digest-daily
+      Description: Triggers daily Bedrock cost digest at 10:00 AM UTC (6 AM EDT)
+      ScheduleExpression: cron(0 10 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: DigestLambdaTarget
+          Arn: !GetAtt DigestLambda.Arn
+
+  DigestLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DigestLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DigestSchedule.Arn
 
 Outputs:
   SNSTopicArn:

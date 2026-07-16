@@ -370,6 +370,43 @@ Resources:
       AlarmActions:
         - !Ref BedrockAlertTopic
 
+  # ── BedrockAPIKey-ew6s / Lisa Harwood ─────────────────────────────────────
+  # NOTE: MetricFilterew6s and Alarmew6s were deployed directly via CLI
+  # (aws logs put-metric-filter / aws cloudwatch put-metric-alarm) on 2026-07-11,
+  # not through this stack, because bedrock-observability's Budget resources
+  # fail every `update-stack` with "budget already exists with different
+  # internalId" (a persistent AWS Budgets/CFN bug in this account — see stack
+  # events from 2026-07-01 and 2026-07-11). If that Budgets bug gets resolved
+  # and this stack is updated again, CFN will try to create these as new
+  # resources and fail since they already exist by the same name — either
+  # import them first or delete the live copies before updating.
+  MetricFilterew6s:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-ew6s
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-ew6s" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-ew6s
+          MetricValue: $.input.inputTokenCount
+
+  Alarmew6s:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-ew6s-LisaHarwood
+      AlarmDescription: "Lisa Harwood (BedrockAPIKey-ew6s) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-ew6s
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
   # ── BedrockAPIKey-f5pe / Steve Myers ──────────────────────────────────────
   MetricFilterf5pe:
     Type: AWS::Logs::MetricFilter
@@ -473,6 +510,39 @@ Resources:
       AlarmDescription: "Pratik Shah (BedrockAPIKey-ivg1) exceeded token spike threshold in 5 min"
       Namespace: Bedrock/UserTokens
       MetricName: InputTokenCount-ivg1
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref UserTokenAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  # ── BedrockAPIKey-khkr / Ali Asghari ──────────────────────────────────────
+  # NOTE: MetricFilterkhkr and Alarmkhkr were deployed directly via CLI
+  # (aws logs put-metric-filter / aws cloudwatch put-metric-alarm) on 2026-07-16,
+  # for the same reason as ew6s above — see that note for details. If the
+  # Budgets bug gets resolved and this stack is updated again, either import
+  # these resources first or delete the live copies before updating.
+  MetricFilterkhkr:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-user-tokens-khkr
+      FilterPattern: '{ $.identity.arn = "arn:aws:iam::051942114270:user/BedrockAPIKey-khkr" }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/UserTokens
+          MetricName: InputTokenCount-khkr
+          MetricValue: $.input.inputTokenCount
+
+  Alarmkhkr:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-UserSpike-khkr-AliAsghari
+      AlarmDescription: "Ali Asghari (BedrockAPIKey-khkr) exceeded token spike threshold in 5 min"
+      Namespace: Bedrock/UserTokens
+      MetricName: InputTokenCount-khkr
       Period: 300
       EvaluationPeriods: 1
       Statistic: Sum
@@ -750,7 +820,7 @@ Resources:
         - Notification:
             NotificationType: FORECASTED
             ComparisonOperator: GREATER_THAN
-            Threshold: 200
+            Threshold: 100
             ThresholdType: PERCENTAGE
           Subscribers:
             - SubscriptionType: SNS
@@ -779,6 +849,21 @@ Resources:
           IncludeTax: true
           IncludeSubscription: true
           UseBlended: false
+      # NOTE: NotificationsWithSubscribers is a createOnly property on
+      # AWS::Budgets::Budget — any diff here forces CFN to REPLACE this
+      # resource (create-new before delete-old). Since BudgetName must stay
+      # fixed/unique, the create call collides with the still-existing old
+      # budget and fails with DuplicateRecordException (a gap in AWS's CFN
+      # provider for this resource type, not fixable from our template).
+      # Only alert at 100% actual — daily digest already covers running
+      # spend, so this is purely the "you went over" signal.
+      # This value was set directly via the Budgets API (bypassing CFN,
+      # since NotificationsWithSubscribers is createOnly on this resource
+      # type — see note above); kept in sync here so future unrelated stack
+      # updates don't try to replace this resource and fail. To change this
+      # threshold safely, either use `aws budgets update-notification`
+      # directly (and update this template to match immediately after), or
+      # delete+recreate the budget out-of-band before updating the stack.
       NotificationsWithSubscribers:
         - Notification:
             NotificationType: ACTUAL

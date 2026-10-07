@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Bedrock cost observability: SNS alerts, per-user CloudWatch metric filters and alarms,
-  account-level token-rate alarms, AWS Budgets, and Cost Anomaly Detection.
+  account-level and all-usage token-rate alarms, and a daily cost digest.
 
 Parameters:
   AlertEmail:
@@ -33,16 +33,22 @@ Parameters:
     Default: 2000000
     Description: Account-wide Opus input tokens in 5 min to trigger alarm (default 2M ~= $30)
 
-  # ── Budget thresholds ─────────────────────────────────────────────────────
-  MonthlyBudgetLimit:
+  # ── All-usage thresholds (every model, every caller combined) ─────────────
+  AllUsageInputTokenThreshold:
     Type: Number
-    Default: 500
-    Description: Monthly Bedrock budget in USD before alerting at 80% and 100%
+    Default: 75000000
+    Description: Total Bedrock input tokens across all models and callers in 5 min to trigger alarm (default 75M)
 
+  AllUsageOutputTokenThreshold:
+    Type: Number
+    Default: 15000000
+    Description: Total Bedrock output tokens across all models and callers in 5 min to trigger alarm (default 15M)
+
+  # ── Daily digest reference ────────────────────────────────────────────────
   DailyBudgetLimit:
     Type: Number
     Default: 75
-    Description: Daily Bedrock budget in USD — alerts at 50% and 100%
+    Description: Daily Bedrock spend in USD that the morning digest reports status against (no AWS Budget; spend limits are managed in LiteLLM)
 
 Resources:
 
@@ -62,7 +68,7 @@ Resources:
       Protocol: email
       Endpoint: !Ref AlertEmail
 
-  # Budgets needs its own SNS policy to publish
+  # Cost Anomaly Detection needs its own SNS policy to publish
   BedrockAlertTopicPolicy:
     Type: AWS::SNS::TopicPolicy
     Properties:
@@ -71,12 +77,6 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: AllowBudgetsPublish
-            Effect: Allow
-            Principal:
-              Service: budgets.amazonaws.com
-            Action: sns:Publish
-            Resource: !Ref BedrockAlertTopic
           - Sid: AllowAnomalyDetectionPublish
             Effect: Allow
             Principal:
@@ -371,17 +371,12 @@ Resources:
         - !Ref BedrockAlertTopic
 
   # ── BedrockAPIKey-ew6s / Lisa Harwood ─────────────────────────────────────
-  # NOTE: MetricFilterew6s and Alarmew6s were deployed directly via CLI
-  # (aws logs put-metric-filter / aws cloudwatch put-metric-alarm) on 2026-07-11,
-  # not through this stack, because bedrock-observability's Budget resources
-  # fail every `update-stack` with "budget already exists with different
-  # internalId" (a persistent AWS Budgets/CFN bug in this account — see stack
-  # events from 2026-07-01 and 2026-07-11). If that Budgets bug gets resolved
-  # and this stack is updated again, CFN will try to create these as new
-  # resources and fail since they already exist by the same name — either
-  # import them first or delete the live copies before updating.
+  # NOTE: MetricFilterew6s and Alarmew6s were originally created via CLI on
+  # 2026-07-11, then imported into this stack on 2026-10-07. DeletionPolicy
+  # is Retain (required for import), so removing them here leaves the live copies.
   MetricFilterew6s:
     Type: AWS::Logs::MetricFilter
+    DeletionPolicy: Retain
     Properties:
       LogGroupName: bedrock-logs
       FilterName: bedrock-user-tokens-ew6s
@@ -393,6 +388,7 @@ Resources:
 
   Alarmew6s:
     Type: AWS::CloudWatch::Alarm
+    DeletionPolicy: Retain
     Properties:
       AlarmName: Bedrock-UserSpike-ew6s-LisaHarwood
       AlarmDescription: "Lisa Harwood (BedrockAPIKey-ew6s) exceeded token spike threshold in 5 min"
@@ -520,13 +516,12 @@ Resources:
         - !Ref BedrockAlertTopic
 
   # ── BedrockAPIKey-khkr / Ali Asghari ──────────────────────────────────────
-  # NOTE: MetricFilterkhkr and Alarmkhkr were deployed directly via CLI
-  # (aws logs put-metric-filter / aws cloudwatch put-metric-alarm) on 2026-07-16,
-  # for the same reason as ew6s above — see that note for details. If the
-  # Budgets bug gets resolved and this stack is updated again, either import
-  # these resources first or delete the live copies before updating.
+  # NOTE: MetricFilterkhkr and Alarmkhkr were originally created via CLI on
+  # 2026-07-16, then imported into this stack on 2026-10-07. DeletionPolicy
+  # is Retain (required for import).
   MetricFilterkhkr:
     Type: AWS::Logs::MetricFilter
+    DeletionPolicy: Retain
     Properties:
       LogGroupName: bedrock-logs
       FilterName: bedrock-user-tokens-khkr
@@ -538,6 +533,7 @@ Resources:
 
   Alarmkhkr:
     Type: AWS::CloudWatch::Alarm
+    DeletionPolicy: Retain
     Properties:
       AlarmName: Bedrock-UserSpike-khkr-AliAsghari
       AlarmDescription: "Ali Asghari (BedrockAPIKey-khkr) exceeded token spike threshold in 5 min"
@@ -763,116 +759,124 @@ Resources:
       AlarmActions:
         - !Ref BedrockAlertTopic
 
-  # ════════════════════════════════════════════════════════════════════════════
-  # AWS BUDGETS
-  # Note: Budgets are global (not regional) and use Cost Explorer data which
-  # has up to 8-hour lag — use CW alarms above for real-time detection.
-  # Budgets are the catch-all for total spend guardrails.
-  # ════════════════════════════════════════════════════════════════════════════
-  BedrockMonthlyBudget:
-    Type: AWS::Budgets::Budget
+  # ── All-usage alarms: every model, every caller, combined ──────────────────
+  # Metric filters on bedrock-logs with no identity/model match, so they also
+  # cover SSO roles, service roles, new keys, and models added in future.
+  MetricFilterAllInput:
+    Type: AWS::Logs::MetricFilter
     Properties:
-      Budget:
-        BudgetName: Bedrock-Monthly
-        BudgetType: COST
-        TimeUnit: MONTHLY
-        BudgetLimit:
-          Amount: !Ref MonthlyBudgetLimit
-          Unit: USD
-        CostFilters:
-          Service:
-            - Amazon Bedrock
-            - Claude Haiku 4.5 (Amazon Bedrock Edition)
-            - Claude Sonnet 4.5 (Amazon Bedrock Edition)
-            - Claude Sonnet 4.6 (Amazon Bedrock Edition)
-            - Claude Opus 4.6 (Amazon Bedrock Edition)
-            - Claude Opus 4.8 (Amazon Bedrock Edition)
-            - Claude 3.5 Haiku (Amazon Bedrock Edition)
-        CostTypes:
-          IncludeTax: true
-          IncludeSubscription: true
-          UseBlended: false
-      NotificationsWithSubscribers:
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            Threshold: 50
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref BedrockAlertTopic
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            Threshold: 80
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref BedrockAlertTopic
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            Threshold: 100
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref BedrockAlertTopic
-        - Notification:
-            NotificationType: FORECASTED
-            ComparisonOperator: GREATER_THAN
-            Threshold: 100
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref BedrockAlertTopic
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-all-usage-input-tokens
+      FilterPattern: '{ $.input.inputTokenCount = * }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/AllUsage
+          MetricName: InputTokenCount
+          MetricValue: $.input.inputTokenCount
+          Unit: Count
 
-  BedrockDailyBudget:
-    Type: AWS::Budgets::Budget
+  MetricFilterAllOutput:
+    Type: AWS::Logs::MetricFilter
     Properties:
-      Budget:
-        BudgetName: Bedrock-Daily
-        BudgetType: COST
-        TimeUnit: DAILY
-        BudgetLimit:
-          Amount: !Ref DailyBudgetLimit
-          Unit: USD
-        CostFilters:
-          Service:
-            - Amazon Bedrock
-            - Claude Haiku 4.5 (Amazon Bedrock Edition)
-            - Claude Sonnet 4.5 (Amazon Bedrock Edition)
-            - Claude Sonnet 4.6 (Amazon Bedrock Edition)
-            - Claude Opus 4.6 (Amazon Bedrock Edition)
-            - Claude Opus 4.8 (Amazon Bedrock Edition)
-            - Claude 3.5 Haiku (Amazon Bedrock Edition)
-        CostTypes:
-          IncludeTax: true
-          IncludeSubscription: true
-          UseBlended: false
-      # NOTE: NotificationsWithSubscribers is a createOnly property on
-      # AWS::Budgets::Budget — any diff here forces CFN to REPLACE this
-      # resource (create-new before delete-old). Since BudgetName must stay
-      # fixed/unique, the create call collides with the still-existing old
-      # budget and fails with DuplicateRecordException (a gap in AWS's CFN
-      # provider for this resource type, not fixable from our template).
-      # Only alert at 100% actual — daily digest already covers running
-      # spend, so this is purely the "you went over" signal.
-      # This value was set directly via the Budgets API (bypassing CFN,
-      # since NotificationsWithSubscribers is createOnly on this resource
-      # type — see note above); kept in sync here so future unrelated stack
-      # updates don't try to replace this resource and fail. To change this
-      # threshold safely, either use `aws budgets update-notification`
-      # directly (and update this template to match immediately after), or
-      # delete+recreate the budget out-of-band before updating the stack.
-      NotificationsWithSubscribers:
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            Threshold: 100
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - SubscriptionType: SNS
-              Address: !Ref BedrockAlertTopic
+      LogGroupName: bedrock-logs
+      FilterName: bedrock-all-usage-output-tokens
+      FilterPattern: '{ $.output.outputTokenCount = * }'
+      MetricTransformations:
+        - MetricNamespace: Bedrock/AllUsage
+          MetricName: OutputTokenCount
+          MetricValue: $.output.outputTokenCount
+          Unit: Count
+
+  AlarmAllUsageInput:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-AllUsageSpike-InputTokens
+      AlarmDescription: "Total Bedrock input tokens across all models and callers spiked in 5 min — potential runaway agent"
+      Namespace: Bedrock/AllUsage
+      MetricName: InputTokenCount
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref AllUsageInputTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmAllUsageOutput:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bedrock-AllUsageSpike-OutputTokens
+      AlarmDescription: "Total Bedrock output tokens across all models and callers spiked in 5 min — output costs 4-5x input"
+      Namespace: Bedrock/AllUsage
+      MetricName: OutputTokenCount
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref AllUsageOutputTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmOpus5Tokens:
+    Type: AWS::CloudWatch::Alarm
+    DeletionPolicy: Retain
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Opus5-InputTokens
+      AlarmDescription: "Account-wide us.anthropic.claude-opus-5 input token rate spike, potential runaway agent"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-opus-5
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref OpusAny5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmOpus55Tokens:
+    Type: AWS::CloudWatch::Alarm
+    DeletionPolicy: Retain
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Opus55-InputTokens
+      AlarmDescription: "Account-wide us.anthropic.claude-opus-5-5 input token rate spike, potential runaway agent"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-opus-5-5
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref OpusAny5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
+
+  AlarmSonnet5Tokens:
+    Type: AWS::CloudWatch::Alarm
+    DeletionPolicy: Retain
+    Properties:
+      AlarmName: Bedrock-AccountSpike-Sonnet5-InputTokens
+      AlarmDescription: "Account-wide us.anthropic.claude-sonnet-5 input token rate spike, potential runaway agent"
+      Namespace: AWS/Bedrock
+      MetricName: InputTokenCount
+      Dimensions:
+        - Name: ModelId
+          Value: us.anthropic.claude-sonnet-5
+      Period: 300
+      EvaluationPeriods: 1
+      Statistic: Sum
+      Threshold: !Ref Sonnet5MinTokenThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref BedrockAlertTopic
 
   # Note: bedrock-logs retention was extended to 90 days via CLI (aws logs put-retention-policy)
   # since the log group pre-existed and CFN EarlyValidation blocks re-declaring existing log groups.
@@ -882,10 +886,9 @@ Resources:
   # ════════════════════════════════════════════════════════════════════════════
   # DAILY MORNING DIGEST — Lambda + EventBridge
   # Runs at 10:00 AM UTC (6 AM EDT) daily to report yesterday's Bedrock spend.
-  # AWS Budgets resets at midnight UTC and Cost Explorer has up to 8-hour lag,
-  # so delayed budget alerts can arrive unexpectedly in the morning. This digest
-  # gives you a predictable daily email with actual spend before you start work,
-  # replacing the surprise of a lagged threshold alert.
+  # Cost Explorer has up to 8-hour lag, so this digest gives a predictable daily
+  # email with actual spend before you start work. Spend limits themselves are
+  # enforced in LiteLLM; there are no AWS Budgets in this stack.
   # ════════════════════════════════════════════════════════════════════════════
   DigestLambdaRole:
     Type: AWS::IAM::Role
@@ -929,16 +932,6 @@ Resources:
           import boto3, os
           from datetime import date, timedelta
 
-          SERVICES = [
-              'Amazon Bedrock',
-              'Claude Haiku 4.5 (Amazon Bedrock Edition)',
-              'Claude Sonnet 4.5 (Amazon Bedrock Edition)',
-              'Claude Sonnet 4.6 (Amazon Bedrock Edition)',
-              'Claude Opus 4.6 (Amazon Bedrock Edition)',
-              'Claude Opus 4.8 (Amazon Bedrock Edition)',
-              'Claude 3.5 Haiku (Amazon Bedrock Edition)',
-          ]
-
           def handler(event, context):
               today = date.today()
               yesterday = today - timedelta(days=1)
@@ -949,7 +942,6 @@ Resources:
               resp = ce.get_cost_and_usage(
                   TimePeriod={'Start': start, 'End': end},
                   Granularity='DAILY',
-                  Filter={'Dimensions': {'Key': 'SERVICE', 'Values': SERVICES}},
                   GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}],
                   Metrics=['UnblendedCost'],
               )
@@ -959,6 +951,10 @@ Resources:
               for result in resp['ResultsByTime']:
                   for group in result['Groups']:
                       svc = group['Keys'][0]
+                      # Match every Bedrock service (all model editions, AgentCore)
+                      # so new models are counted without editing this list.
+                      if 'Bedrock' not in svc:
+                          continue
                       amt = float(group['Metrics']['UnblendedCost']['Amount'])
                       if amt > 0:
                           lines.append(f'  {svc}: ${amt:.4f}')
@@ -982,12 +978,12 @@ Resources:
                       f'Breakdown:\n{breakdown}\n\n'
                       f'Note: Cost Explorer data has up to 8-hour lag. This digest runs at\n'
                       f'10:00 AM UTC (6 AM EDT) so yesterday\'s full spend is captured here\n'
-                      f'rather than arriving as a surprise Budget threshold alert.'
+                      f'as a routine report.'
                   )
 
               boto3.client('sns').publish(
                   TopicArn=os.environ['SNS_TOPIC_ARN'],
-                  Subject=f'[Bedrock Daily Digest — routine, not a budget alert] {yesterday} — ${total:.4f} ({status})',
+                  Subject=f'[Bedrock Daily Digest] {yesterday} — ${total:.4f} ({status})',
                   Message=body,
               )
 
@@ -1016,9 +1012,3 @@ Outputs:
     Description: SNS topic ARN — subscribe additional emails or Slack webhooks here
     Export:
       Name: BedrockAlertTopicArn
-
-  MonthlyBudgetName:
-    Value: !Ref BedrockMonthlyBudget
-
-  DailyBudgetName:
-    Value: !Ref BedrockDailyBudget
